@@ -1,6 +1,6 @@
 # SDF_2D_generator
 
-[中文 README](README.zh-CN.md)
+[简体中文](README.zh-CN.md)
 
 A Qt Widgets GUI and C++ examples for generating 2D Signed Distance Field (SDF) images from bitmap inputs.
 
@@ -11,7 +11,7 @@ A Qt Widgets GUI and C++ examples for generating 2D Signed Distance Field (SDF) 
 
 ## Repo Layout
 - `Qt_project/SDF_2D_generator` - Qt Widgets app (CMake, C++17).
-- `SDFGenerate_cpp` - CMake-based console demos (C++11).
+- `SDFGenerate_cpp` - CMake-based console demos (C++11), used [lodepng library](https://github.com/lvandeve/lodepng) to implement.
 - `README.zh-CN.md` - Chinese README.
 
 ## Build: Qt GUI
