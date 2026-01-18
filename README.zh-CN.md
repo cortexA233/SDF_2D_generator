@@ -8,6 +8,7 @@
 - GUI 流程：加载图片、设置输出尺寸/阈值/最大距离、预览、可取消、保存 PNG。
 - 多线程距离变换（按行/列两次扫描）加速 SDF 生成。
 - 独立的 C++ 控制台示例，内置 `lodepng`，无需额外依赖。
+<img width="994" height="742" alt="image" src="https://github.com/user-attachments/assets/b73d94c6-2c9c-4401-a2e0-0dce1caa9823" />
 
 ## 仓库结构
 - `Qt_project/SDF_2D_generator` - Qt Widgets 应用（CMake，C++17）。
