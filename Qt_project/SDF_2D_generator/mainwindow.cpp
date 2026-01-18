@@ -1,10 +1,16 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <functional>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #include <QFileDialog>
 #include <QFileInfo>
@@ -18,6 +24,102 @@
 
 namespace sdf_internal {
 constexpr double kInfinity = 1e20;
+
+int effectiveThreadCount(int totalBlocks)
+{
+    unsigned int hw = std::thread::hardware_concurrency();
+    if (hw == 0) {
+        hw = 4;
+    }
+    return std::max(1, std::min(static_cast<int>(hw), totalBlocks));
+}
+
+int chooseBlockSize(int totalItems)
+{
+    if (totalItems <= 0) {
+        return 1;
+    }
+    const int threads = effectiveThreadCount(totalItems);
+    int size = totalItems / (threads * 4);
+    if (size < 1) {
+        size = 1;
+    }
+    return size;
+}
+
+template <typename BlockFn, typename ProgressFn>
+bool runParallelBlocks(
+    int totalItems,
+    int blockSize,
+    std::atomic_bool *cancel,
+    const BlockFn &blockFn,
+    const ProgressFn &progressFn)
+{
+    if (totalItems <= 0) {
+        return true;
+    }
+    if (blockSize <= 0) {
+        blockSize = chooseBlockSize(totalItems);
+    }
+
+    const int totalBlocks = (totalItems + blockSize - 1) / blockSize;
+    const int threadCount = effectiveThreadCount(totalBlocks);
+    std::atomic<int> nextBlock(0);
+    std::atomic<int> blocksDone(0);
+    std::mutex mutex;
+    std::condition_variable cv;
+
+    auto workerFn = [&]() {
+        while (true) {
+            if (cancel && cancel->load()) {
+                break;
+            }
+            const int block = nextBlock.fetch_add(1);
+            if (block >= totalBlocks) {
+                break;
+            }
+            const int start = block * blockSize;
+            const int end = std::min(start + blockSize, totalItems);
+            blockFn(start, end);
+            blocksDone.fetch_add(1);
+            cv.notify_all();
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<size_t>(threadCount));
+    for (int i = 0; i < threadCount; ++i) {
+        threads.emplace_back(workerFn);
+    }
+
+    int reportedItems = 0;
+    while (true) {
+        if (cancel && cancel->load()) {
+            break;
+        }
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait_for(lock, std::chrono::milliseconds(30));
+        }
+        const int doneBlocks = blocksDone.load();
+        const int completedItems = std::min(doneBlocks * blockSize, totalItems);
+        if (completedItems > reportedItems) {
+            progressFn(completedItems - reportedItems);
+            reportedItems = completedItems;
+        }
+        if (doneBlocks >= totalBlocks) {
+            break;
+        }
+    }
+
+    for (auto &thread : threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    return !(cancel && cancel->load());
+}
 
 void distanceTransform1D(const QVector<double> &f, QVector<double> &d, int n)
 {
@@ -64,7 +166,7 @@ QVector<double> distanceTransform2D(
     int width,
     int height,
     std::atomic_bool *cancel,
-    const std::function<void()> &stepFn)
+    const std::function<void(int)> &progressFn)
 {
     if (width <= 0 || height <= 0 || f.size() != width * height) {
         return {};
@@ -73,41 +175,49 @@ QVector<double> distanceTransform2D(
     QVector<double> tmp(width * height);
     QVector<double> out(width * height);
 
-    QVector<double> rowIn(width);
-    QVector<double> rowOut(width);
-    for (int y = 0; y < height; ++y) {
-        if (cancel && cancel->load()) {
-            return {};
+    const auto rowBlock = [&](int start, int end) {
+        QVector<double> rowIn(width);
+        QVector<double> rowOut(width);
+        for (int y = start; y < end; ++y) {
+            if (cancel && cancel->load()) {
+                return;
+            }
+            const int rowOffset = y * width;
+            for (int x = 0; x < width; ++x) {
+                rowIn[x] = f[rowOffset + x];
+            }
+            distanceTransform1D(rowIn, rowOut, width);
+            for (int x = 0; x < width; ++x) {
+                tmp[rowOffset + x] = rowOut[x];
+            }
         }
-        const int rowOffset = y * width;
-        for (int x = 0; x < width; ++x) {
-            rowIn[x] = f[rowOffset + x];
-        }
-        distanceTransform1D(rowIn, rowOut, width);
-        for (int x = 0; x < width; ++x) {
-            tmp[rowOffset + x] = rowOut[x];
-        }
-        if (stepFn) {
-            stepFn();
-        }
+    };
+
+    const int rowBlockSize = chooseBlockSize(height);
+    if (!runParallelBlocks(height, rowBlockSize, cancel, rowBlock, progressFn)) {
+        return {};
     }
 
-    QVector<double> colIn(height);
-    QVector<double> colOut(height);
-    for (int x = 0; x < width; ++x) {
-        if (cancel && cancel->load()) {
-            return {};
+    const auto colBlock = [&](int start, int end) {
+        QVector<double> colIn(height);
+        QVector<double> colOut(height);
+        for (int x = start; x < end; ++x) {
+            if (cancel && cancel->load()) {
+                return;
+            }
+            for (int y = 0; y < height; ++y) {
+                colIn[y] = tmp[y * width + x];
+            }
+            distanceTransform1D(colIn, colOut, height);
+            for (int y = 0; y < height; ++y) {
+                out[y * width + x] = colOut[y];
+            }
         }
-        for (int y = 0; y < height; ++y) {
-            colIn[y] = tmp[y * width + x];
-        }
-        distanceTransform1D(colIn, colOut, height);
-        for (int y = 0; y < height; ++y) {
-            out[y * width + x] = colOut[y];
-        }
-        if (stepFn) {
-            stepFn();
-        }
+    };
+
+    const int colBlockSize = chooseBlockSize(width);
+    if (!runParallelBlocks(width, colBlockSize, cancel, colBlock, progressFn)) {
+        return {};
     }
 
     return out;
@@ -160,14 +270,18 @@ public slots:
             return;
         }
 
-        const int totalSteps = outHeight + (4 * (outHeight + outWidth)) + outHeight;
-        int steps = 0;
-        auto step = [&]() {
-            if (totalSteps <= 0) {
+        const int totalUnits = (5 * outHeight) + (2 * outWidth);
+        int completedUnits = 0;
+        auto reportUnits = [&](int delta) {
+            if (totalUnits <= 0) {
+                emit progress(100);
                 return;
             }
-            ++steps;
-            const int pct = (steps * 100) / totalSteps;
+            completedUnits += delta;
+            if (completedUnits > totalUnits) {
+                completedUnits = totalUnits;
+            }
+            const int pct = (completedUnits * 100) / totalUnits;
             emit progress(pct);
         };
 
@@ -184,7 +298,7 @@ public slots:
                 const uchar gray = row[cx];
                 insideMask[ox + oy * outWidth] = (gray > thresholdValue) ? 1 : 0;
             }
-            step();
+            reportUnits(1);
         }
 
         QVector<double> fOutside(outWidth * outHeight);
@@ -204,7 +318,7 @@ public slots:
             outWidth,
             outHeight,
             &cancelRequested,
-            step);
+            reportUnits);
         if (distOutsideSq.isEmpty()) {
             if (cancelRequested.load()) {
                 emit canceled();
@@ -219,7 +333,7 @@ public slots:
             outWidth,
             outHeight,
             &cancelRequested,
-            step);
+            reportUnits);
         if (distInsideSq.isEmpty()) {
             if (cancelRequested.load()) {
                 emit canceled();
@@ -233,33 +347,38 @@ public slots:
         double minDistance = std::numeric_limits<double>::max();
         double maxDistanceValue = std::numeric_limits<double>::lowest();
 
-        for (int i = 0; i < signedDistances.size(); ++i) {
+        for (int y = 0; y < outHeight; ++y) {
             if (cancelRequested.load()) {
                 emit canceled();
                 return;
             }
-            double dist = 0.0;
-            if (insideMask[i]) {
-                dist = std::sqrt(distOutsideSq[i]);
-            } else {
-                dist = -std::sqrt(distInsideSq[i]);
-            }
+            const int rowOffset = y * outWidth;
+            for (int x = 0; x < outWidth; ++x) {
+                const int i = rowOffset + x;
+                double dist = 0.0;
+                if (insideMask[i]) {
+                    dist = std::sqrt(distOutsideSq[i]);
+                } else {
+                    dist = -std::sqrt(distInsideSq[i]);
+                }
 
-            if (maxDistance > 0) {
-                if (dist > maxDistance) {
-                    dist = maxDistance;
-                } else if (dist < -maxDistance) {
-                    dist = -maxDistance;
+                if (maxDistance > 0) {
+                    if (dist > maxDistance) {
+                        dist = maxDistance;
+                    } else if (dist < -maxDistance) {
+                        dist = -maxDistance;
+                    }
+                }
+
+                signedDistances[i] = dist;
+                if (dist < minDistance) {
+                    minDistance = dist;
+                }
+                if (dist > maxDistanceValue) {
+                    maxDistanceValue = dist;
                 }
             }
-
-            signedDistances[i] = dist;
-            if (dist < minDistance) {
-                minDistance = dist;
-            }
-            if (dist > maxDistanceValue) {
-                maxDistanceValue = dist;
-            }
+            reportUnits(1);
         }
 
         QImage output(outWidth, outHeight, QImage::Format_Grayscale8);
@@ -270,8 +389,9 @@ public slots:
                 return;
             }
             uchar *line = output.scanLine(y);
+            const int rowOffset = y * outWidth;
             for (int x = 0; x < outWidth; ++x) {
-                const int idx = x + y * outWidth;
+                const int idx = rowOffset + x;
                 double normalized = 0.5;
                 if (denom > 0.0) {
                     normalized = (signedDistances[idx] - minDistance) / denom;
@@ -279,7 +399,7 @@ public slots:
                 const int value = 255 - qBound(0, static_cast<int>(std::lround(normalized * 255.0)), 255);
                 line[x] = static_cast<uchar>(value);
             }
-            step();
+            reportUnits(1);
         }
 
         emit progress(100);
