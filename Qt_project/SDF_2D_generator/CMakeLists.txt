@@ -16,9 +16,11 @@ set(TS_FILES SDF_2D_generator_zh_CN.ts)
 
 set(PROJECT_SOURCES
         main.cpp
-        mainwindow.cpp
-        mainwindow.h
-        mainwindow.ui
+        MainWindow.cpp
+        MainWindow.h
+        SdfWorker.cpp
+        SdfWorker.h
+        MainWindow.ui
         ${TS_FILES}
 )
 
