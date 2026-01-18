@@ -8,6 +8,7 @@ A Qt Widgets GUI and C++ examples for generating 2D Signed Distance Field (SDF) 
 - GUI workflow: load image, set output size/threshold/max distance, preview, cancel, and save PNG.
 - Multithreaded distance transform (row/column passes) for faster SDF generation.
 - Standalone C++ console demos using the bundled `lodepng` (no extra deps).
+<img width="994" height="742" alt="image" src="https://github.com/user-attachments/assets/ec7df611-20b3-474a-a4f6-70032a8a7dd0" />
 
 ## Repo Layout
 - `Qt_project/SDF_2D_generator` - Qt Widgets app (CMake, C++17).
